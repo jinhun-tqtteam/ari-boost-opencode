@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { tool } from "@opencode-ai/plugin";
 
 const PLUGIN_ID = "ariboost";
 const DEFAULT_WINDOW_HOURS = 5;
@@ -293,8 +294,6 @@ function formatStats(result, hours, topN) {
  * @type {import('@opencode-ai/plugin').Plugin}
  */
 export async function AriboostPlugin() {
-  const { tool } = await import("@opencode-ai/plugin");
-
   return {
     tool: {
       ariboost_stats: tool({

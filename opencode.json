@@ -1,4 +1,4 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["ariboost@git+https://github.com/jinhun-tqtteam/ari-boost-opencode.git"]
+  "plugin": []
 }
