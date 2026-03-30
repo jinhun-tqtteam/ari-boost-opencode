@@ -28,7 +28,7 @@ Add the plugin to your OpenCode config:
 {
   "$schema": "https://opencode.ai/config.json",
   "plugin": [
-    "ariboost@git+https://github.com/<your-user>/ariboost.git"
+    "ariboost@git+https://github.com/jinhun-tqtteam/ari-boost-opencode.git"
   ]
 }
 ```
@@ -52,6 +52,33 @@ Example:
 
 ```text
 Use ariboost_stats with hours 12 and top 10
+```
+
+## Quick command
+
+You can also add a short command in your OpenCode config:
+
+`~/.config/opencode/opencode.json`
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [
+    "ariboost@git+https://github.com/jinhun-tqtteam/ari-boost-opencode.git"
+  ],
+  "command": {
+    "ariboost": {
+      "description": "Show Ariboost model request stats",
+      "template": "Use ariboost_stats"
+    }
+  }
+}
+```
+
+Then run:
+
+```text
+/ariboost
 ```
 
 ## Where data is stored
@@ -82,8 +109,8 @@ git init
 git add .
 git commit -m "feat: add ariboost opencode plugin"
 git branch -M main
-git remote add origin https://github.com/<your-user>/ariboost.git
+git remote add origin https://github.com/jinhun-tqtteam/ari-boost-opencode.git
 git push -u origin main
 ```
 
-Then update the GitHub URL in your OpenCode config on every machine where you want to use the plugin.
+Then use the GitHub URL above in your OpenCode config on every machine where you want to use the plugin.

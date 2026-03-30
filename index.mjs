@@ -1,20 +1,20 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { tool } from "@opencode-ai/plugin";
 
 const PLUGIN_ID = "ariboost";
 const DEFAULT_WINDOW_HOURS = 5;
 const DEFAULT_TOP_MODELS = 5;
-const STATE_VERSION = 1;
-const LLM_LOG_PATTERN = /^(?:INFO|WARN|ERROR)\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\s+.*?service=llm\s+providerID=([A-Za-z0-9._:/-]+)\s+modelID=([A-Za-z0-9._:/-]+)\b.*\bstream\b/;
+const RECENT_RETENTION_HOURS = 24 * 30;
+const STATE_VERSION = 2;
+const LLM_LOG_PATTERN = /^(?:INFO|WARN|ERROR)\s+(\d{4}-\d{2}-\d{2}T[^\s]+)\s+.*?service=llm\s+providerID=([A-Za-z0-9._:/-]+)\s+modelID=([A-Za-z0-9._:/-]+)/;
 
 function createDefaultState() {
   return {
     version: STATE_VERSION,
     totalRequests: 0,
     byModel: {},
-    recentRequests: [],
+    recentBuckets: {},
     files: {},
     updatedAt: null,
   };
@@ -22,6 +22,28 @@ function createDefaultState() {
 
 function toModelKey(providerID, modelID) {
   return `${providerID}/${modelID}`;
+}
+
+function toHourBucket(ts) {
+  const hour = new Date(ts);
+  hour.setMinutes(0, 0, 0);
+  return hour.toISOString();
+}
+
+function createHourlyBuckets(requests) {
+  const buckets = {};
+
+  for (const request of requests) {
+    const bucket = toHourBucket(request.ts);
+    const key = toModelKey(request.providerID, request.modelID);
+    if (!buckets[bucket]) {
+      buckets[bucket] = {};
+    }
+
+    buckets[bucket][key] = (buckets[bucket][key] || 0) + 1;
+  }
+
+  return buckets;
 }
 
 function getHomeDirectory() {
@@ -89,12 +111,17 @@ async function loadState(statePath) {
       return createDefaultState();
     }
 
+    const recentRequests = Array.isArray(parsed.recentRequests) ? parsed.recentRequests : [];
+    const recentBuckets = parsed.recentBuckets && typeof parsed.recentBuckets === "object"
+      ? parsed.recentBuckets
+      : createHourlyBuckets(recentRequests);
+
     return {
       ...createDefaultState(),
       ...parsed,
       byModel: parsed.byModel && typeof parsed.byModel === "object" ? parsed.byModel : {},
       files: parsed.files && typeof parsed.files === "object" ? parsed.files : {},
-      recentRequests: Array.isArray(parsed.recentRequests) ? parsed.recentRequests : [],
+      recentBuckets,
       version: STATE_VERSION,
     };
   } catch {
@@ -127,23 +154,53 @@ function parseLogLine(line) {
 
 function addRequestToState(state, request) {
   const key = toModelKey(request.providerID, request.modelID);
+  const bucket = toHourBucket(request.ts);
   state.totalRequests += 1;
   state.byModel[key] = (state.byModel[key] || 0) + 1;
-  state.recentRequests.push(request);
+  if (!state.recentBuckets[bucket]) {
+    state.recentBuckets[bucket] = {};
+  }
+
+  state.recentBuckets[bucket][key] = (state.recentBuckets[bucket][key] || 0) + 1;
 }
 
-function pruneRecentRequests(state, now, windowMs) {
-  state.recentRequests = state.recentRequests.filter((request) => now - request.ts <= windowMs);
+function pruneRecentBuckets(state, now, windowMs) {
+  for (const bucket of Object.keys(state.recentBuckets)) {
+    if (now - new Date(bucket).getTime() > windowMs) {
+      delete state.recentBuckets[bucket];
+    }
+  }
+}
+
+function collectRecentBreakdown(recentBuckets, now, windowMs) {
+  const byModel = {};
+  let totalRequests = 0;
+
+  for (const [bucket, counts] of Object.entries(recentBuckets)) {
+    if (now - new Date(bucket).getTime() > windowMs) {
+      continue;
+    }
+
+    for (const [model, count] of Object.entries(counts)) {
+      byModel[model] = (byModel[model] || 0) + count;
+      totalRequests += count;
+    }
+  }
+
+  return { byModel, totalRequests };
 }
 
 async function scanLogFile(filePath, state) {
   const fileState = state.files[filePath] || { offset: 0, remainder: "" };
+  const fileStat = await fs.stat(filePath);
   const buffer = await fs.readFile(filePath);
 
-  if (buffer.length < fileState.offset) {
+  if ((fileState.createdAt && fileStat.ctimeMs > fileState.createdAt) || buffer.length < fileState.offset) {
     fileState.offset = 0;
     fileState.remainder = "";
   }
+
+  fileState.createdAt = fileStat.ctimeMs;
 
   const appended = buffer.subarray(fileState.offset).toString("utf8");
   const combined = `${fileState.remainder || ""}${appended}`;
@@ -164,6 +221,7 @@ async function scanLogFile(filePath, state) {
 
 async function collectStats(hours) {
   const windowMs = hours * 60 * 60 * 1000;
+  const retentionMs = RECENT_RETENTION_HOURS * 60 * 60 * 1000;
   const now = Date.now();
   const logDir = await resolveLogDir();
   const statePath = await resolveStatePath();
@@ -187,23 +245,19 @@ async function collectStats(hours) {
     await scanLogFile(filePath, state);
   }
 
-  pruneRecentRequests(state, now, windowMs);
+  pruneRecentBuckets(state, now, retentionMs);
   state.updatedAt = new Date(now).toISOString();
   await saveState(statePath, state);
 
-  const recentByModel = {};
-  for (const request of state.recentRequests) {
-    const key = toModelKey(request.providerID, request.modelID);
-    recentByModel[key] = (recentByModel[key] || 0) + 1;
-  }
+  const recent = collectRecentBreakdown(state.recentBuckets, now, windowMs);
 
   return {
     logDir,
     statePath,
     totalRequests: state.totalRequests,
-    recentRequests: state.recentRequests.length,
+    recentRequests: recent.totalRequests,
     byModel: state.byModel,
-    recentByModel,
+    recentByModel: recent.byModel,
     trackedFiles: logFiles.length,
     updatedAt: state.updatedAt,
   };
@@ -239,6 +293,8 @@ function formatStats(result, hours, topN) {
  * @type {import('@opencode-ai/plugin').Plugin}
  */
 export async function AriboostPlugin() {
+  const { tool } = await import("@opencode-ai/plugin");
+
   return {
     tool: {
       ariboost_stats: tool({
@@ -268,5 +324,18 @@ export async function AriboostPlugin() {
     },
   };
 }
+
+export const __test = {
+  collectRecentBreakdown,
+  collectStats,
+  createHourlyBuckets,
+  createDefaultState,
+  loadState,
+  parseLogLine,
+  pruneRecentBuckets,
+  saveState,
+  scanLogFile,
+  toHourBucket,
+};
 
 export default AriboostPlugin;

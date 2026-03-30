@@ -23,6 +23,7 @@
     "@opencode-ai/plugin": "^1.3.3"
   },
   "scripts": {
-    "check": "node --check index.mjs"
+    "check": "node --check index.mjs",
+    "test": "node --test"
   }
 }
