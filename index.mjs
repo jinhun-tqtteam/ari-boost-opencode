@@ -8,7 +8,9 @@ const DEFAULT_WINDOW_HOURS = 5;
 const DEFAULT_TOP_MODELS = 5;
 const RECENT_RETENTION_HOURS = 24 * 30;
 const STATE_VERSION = 2;
-const LLM_LOG_PATTERN = /^(?:INFO|WARN|ERROR)\s+(\d{4}-\d{2}-\d{2}T[^\s]+)\s+.*?service=llm\s+providerID=([A-Za-z0-9._:/-]+)\s+modelID=([A-Za-z0-9._:/-]+)/;
+
+// FIX 1: Nới lỏng Regex, bỏ dấu `^` ở đầu để chống vỡ trận nếu log có dính mã màu ANSI hoặc prefix lạ.
+const LLM_LOG_PATTERN = /(?:INFO|WARN|ERROR)\s+(\d{4}-\d{2}-\d{2}T[^\s]+)\s+.*?service=llm\s+providerID=([A-Za-z0-9._:/-]+)\s+modelID=([A-Za-z0-9._:/-]+)/;
 
 function createDefaultState() {
   return {
@@ -191,32 +193,44 @@ function collectRecentBreakdown(recentBuckets, now, windowMs) {
   return { byModel, totalRequests };
 }
 
+// FIX 2: Viết lại hoàn toàn logic scan log để đọc Text an toàn, tránh vỡ buffer và rò rỉ bộ nhớ.
 async function scanLogFile(filePath, state) {
   const fileState = state.files[filePath] || { offset: 0, remainder: "" };
   const fileStat = await fs.stat(filePath);
-  const buffer = await fs.readFile(filePath);
 
-  if ((fileState.createdAt && fileStat.ctimeMs > fileState.createdAt) || buffer.length < fileState.offset) {
+  // Nếu file bị rotate (size nhỏ hơn offset) hoặc là một file ctime mới tinh -> Reset offset
+  if ((fileState.createdAt && fileStat.ctimeMs > fileState.createdAt) || fileStat.size < fileState.offset) {
     fileState.offset = 0;
     fileState.remainder = "";
   }
 
   fileState.createdAt = fileStat.ctimeMs;
 
-  const appended = buffer.subarray(fileState.offset).toString("utf8");
+  // Đọc nguyên cục file dưới dạng UTF-8 string, xử lý dứt điểm bài toán nứt byte
+  const content = await fs.readFile(filePath, "utf8");
+  
+  // Slice chuỗi từ vị trí offset cũ
+  const appended = content.slice(fileState.offset);
   const combined = `${fileState.remainder || ""}${appended}`;
+  
+  // Tách dòng
   const lines = combined.split(/\r?\n/);
+  
+  // Xử lý line cuối cùng (có thể là dòng đang ghi dở chưa có \n)
   const endsWithNewline = /\r?\n$/.test(combined);
   fileState.remainder = endsWithNewline ? "" : lines.pop() || "";
 
+  // Bắt đầu loop parse
   for (const line of lines) {
+    if (!line.trim()) continue; // Bỏ qua dòng trống rác
     const request = parseLogLine(line);
     if (request) {
       addRequestToState(state, request);
     }
   }
 
-  fileState.offset = buffer.length;
+  // Cập nhật lại offset mới dựa trên length của string đã đọc xong
+  fileState.offset = content.length;
   state.files[filePath] = fileState;
 }
 
